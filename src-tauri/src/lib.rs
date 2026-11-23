@@ -1,13 +1,15 @@
 //! Thin command layer. Keep this file boring: argument marshalling only.
-//! Anything with logic belongs in `media_server.rs` or `sidecar.rs`.
+//! Anything with logic belongs in `media_server.rs`, `sidecar.rs`, or `bootstrap.rs`.
 
+mod bootstrap;
 mod media_server;
 mod sidecar;
 
 use std::path::PathBuf;
 
+use bootstrap::ToolchainStatus;
 use media_server::MediaServer;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 struct AppState {
     media: MediaServer,
@@ -37,6 +39,64 @@ fn register_local_file(state: State<'_, AppState>, path: String) -> Result<Strin
     Ok(state.media.url_for(&id))
 }
 
+/// Launch-time bootstrap: install or update yt-dlp, verifying every downloaded byte.
+/// Progress is streamed to the frontend on `toolchain://status`.
+#[tauri::command]
+async fn toolchain_ensure(app: tauri::AppHandle, force: bool) -> Result<ToolchainStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("no app data directory: {e}"))?;
+        let handle = app.clone();
+        Ok(bootstrap::ensure(&data_dir, force, &move |status| {
+            let _ = handle.emit("toolchain://status", status.clone());
+        }))
+    })
+    .await
+    .map_err(|e| format!("toolchain task failed: {e}"))?
+}
+
+/// Cheap synchronous view of what is available right now.
+#[tauri::command]
+fn toolchain_status(app: tauri::AppHandle) -> ToolchainStatus {
+    let data_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(_) => {
+            return ToolchainStatus {
+                phase: "error".into(),
+                version: None,
+                path: None,
+                detail: Some("no app data directory".into()),
+                received: 0,
+                total: 0,
+            }
+        }
+    };
+
+    match bootstrap::locate(&data_dir) {
+        Some(path) => {
+            let version = bootstrap::probe_version(&path);
+            ToolchainStatus {
+                phase: if version.is_some() { "ready".into() } else { "error".into() },
+                version,
+                path: Some(path.to_string_lossy().into_owned()),
+                detail: None,
+                received: 0,
+                total: 0,
+            }
+        }
+        None => ToolchainStatus {
+            phase: "checking".into(),
+            version: None,
+            path: None,
+            detail: Some("yt-dlp not installed yet".into()),
+            received: 0,
+            total: 0,
+        },
+    }
+}
+
 /// Download (or reuse) a YouTube track into the cache and hand back a local URL.
 ///
 /// Cache-then-play, deliberately: it gives the analyser real same-origin bytes, makes
@@ -49,9 +109,13 @@ async fn resolve_track(
 ) -> Result<ResolvedResponse, String> {
     let cache_dir = state.cache_dir.clone();
     let media = state.media.clone();
-    let bin = yt_dlp_path(&app);
 
     tauri::async_runtime::spawn_blocking(move || -> Result<ResolvedResponse, String> {
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("no app data directory: {e}"))?;
+        let bin = bootstrap::locate(&data_dir).ok_or("yt-dlp is not installed yet")?;
         let resolved = sidecar::resolve_audio(&bin, &url, &cache_dir)?;
         let id = media.register(PathBuf::from(&resolved.path));
         Ok(ResolvedResponse {
@@ -67,22 +131,9 @@ async fn resolve_track(
 
 #[tauri::command]
 fn resolver_health(app: tauri::AppHandle) -> Result<String, String> {
-    sidecar::probe(&yt_dlp_path(&app))
-}
-
-/// Prefer a sidecar bundled next to the executable; fall back to PATH in development.
-fn yt_dlp_path(app: &tauri::AppHandle) -> PathBuf {
-    let name = if cfg!(windows) { "yt-dlp.exe" } else { "yt-dlp" };
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    let _ = app;
-    PathBuf::from(name)
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let bin = bootstrap::locate(&data_dir).ok_or("yt-dlp is not installed")?;
+    bootstrap::probe_version(&bin).ok_or_else(|| "yt-dlp found but not runnable".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -100,6 +151,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             register_local_file,
+            toolchain_ensure,
+            toolchain_status,
             resolve_track,
             resolver_health
         ])

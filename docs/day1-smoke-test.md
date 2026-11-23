@@ -17,9 +17,17 @@ over HTTP; in a bundle it is not. Several media bugs only exist in the second ca
 | G | YouTube playback uses the same graph | `YouTube playback` turns green | ☐ | ☐ |
 | H | Range/seek is not doing a linear re-read | "Seek → 80%" under 500 ms | ☐ | ☐ |
 | I | CSP allows the app and blocks everything else | window renders, no CSP errors in console | ☐ | ☐ |
+| J | First launch installs a verified `yt-dlp` with no manual setup | delete the app-data `bin/` dir, relaunch, watch the progress bar | ✅ headless | ☐ |
 
 `cargo test` covers what can be tested headlessly: Range parsing and clamping, the
-token check, path-traversal rejection, and URL validation (including flag-shaped input).
+token check, path-traversal rejection, URL validation (including flag-shaped input),
+checksum mismatch rejection, and — with `--ignored` — a real download that must verify
+and run.
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture  # network
+```
 
 ## Failure → response
 
@@ -31,6 +39,32 @@ token check, path-traversal rejection, and URL validation (including flag-shaped
 | Window is blank with CSP violations | `devCsp`/`csp` missing an origin | fix the policy, never disable it |
 | `yt-dlp` exits non-zero | extractor drift, region lock, or age gate | try another track; update the sidecar; this is why the demo is pre-cached |
 | Visualizer janks on macOS only | `backdrop-filter` over a live canvas | blur a static layer, drop radius, or lower canvas DPR |
+
+## Toolchain bootstrap
+
+The app installs and updates its own `yt-dlp`, because a bundled app launched from
+Finder does not inherit a shell `PATH` and a fresh machine has no binary at all.
+
+Policy, in order:
+
+1. **Managed copy** in `<app data>/bin/yt-dlp` — checksum-verified, used and updated.
+2. **Bundled sidecar** next to the executable (for future packaged builds).
+3. **System binary** — last resort only, after a failed bootstrap.
+
+A system binary is never preferred in step 1, even in development: anything found on
+`PATH` is an unverified executable, and PATH is a code-execution vector.
+
+Rules that are not optional:
+
+- the release asset is hashed *while* streaming to `*.part`, compared against the
+  SHA-256 published by the release, and only then renamed into place
+- a candidate must answer `--version` before it replaces a working binary
+- the previous binary stays as `yt-dlp.bak`, so a bad update is one rename to undo
+- update checks are throttled to every 6 hours; a failed update never breaks a working install
+
+Verified: `cargo test -- --ignored` installs `yt-dlp 2026.10.26` into a temp directory,
+probes it, and cleans up. A separate test proves a mismatched checksum deletes the
+download instead of installing it.
 
 ## Audio substrate contract
 

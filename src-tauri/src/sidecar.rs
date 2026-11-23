@@ -151,17 +151,6 @@ pub fn resolve_audio(bin: &Path, raw_url: &str, cache_dir: &Path) -> Result<Reso
     })
 }
 
-/// Cheap readiness check for the pre-class ritual.
-pub fn probe(bin: &Path) -> Result<String, String> {
-    let mut command = Command::new(bin);
-    command.arg("--version").stdin(Stdio::null());
-    let output = command.output().map_err(|e| format!("could not run yt-dlp: {e}"))?;
-    if !output.status.success() {
-        return Err("yt-dlp --version failed".into());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
 pub fn is_supported_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())

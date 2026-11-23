@@ -4,6 +4,12 @@ import { open } from '@tauri-apps/plugin-dialog';
 import './App.css';
 import { EQ_BANDS, getAudioEngine } from './core/audio/AudioEngine';
 import { CanvasVisualizer } from './core/visualizer/CanvasVisualizer';
+import {
+  ensureToolchain,
+  onToolchainStatus,
+  progressPercent,
+  type ToolchainStatus,
+} from './core/platform/toolchain';
 
 type ResolvedTrack = { url: string; title: string; duration: number; video_id: string };
 
@@ -12,6 +18,7 @@ type Check = { id: string; label: string; state: CheckState; detail?: string };
 
 const INITIAL_CHECKS: Check[] = [
   { id: 'graph', label: 'Audio graph built (1 context, 10 bands)', state: 'todo' },
+  { id: 'toolchain', label: 'yt-dlp installed, verified, and runnable', state: 'todo' },
   { id: 'analyser', label: 'Analyser sees real samples (peak > 0)', state: 'todo' },
   { id: 'local', label: 'Local file plays through the loopback server', state: 'todo' },
   { id: 'resolve', label: 'yt-dlp resolves a YouTube track', state: 'todo' },
@@ -46,8 +53,8 @@ export default function App() {
   const [log, setLog] = useState<string[]>([]);
   const [eq, setEq] = useState<number[]>(() => EQ_BANDS.map(() => 0));
   const [peak, setPeak] = useState(0);
-  const [health, setHealth] = useState<string | null>(null);
   const [env, setEnv] = useState('');
+  const [toolchain, setToolchain] = useState<ToolchainStatus | null>(null);
 
   const engine = engineRef.current;
 
@@ -58,6 +65,20 @@ export default function App() {
   const setCheck = useCallback((id: string, state: CheckState, detail?: string) => {
     setChecks((prev) => prev.map((c) => (c.id === id ? { ...c, state, detail: detail ?? c.detail } : c)));
   }, []);
+
+  const applyToolchain = useCallback(
+    (status: ToolchainStatus) => {
+      setToolchain(status);
+      if (status.phase === 'ready' && status.version) {
+        setCheck('toolchain', 'pass', `yt-dlp ${status.version}`);
+      } else if (status.phase === 'error') {
+        setCheck('toolchain', 'fail', status.detail ?? 'toolchain unavailable');
+      } else {
+        setCheck('toolchain', 'todo', status.detail ?? undefined);
+      }
+    },
+    [setCheck],
+  );
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -80,12 +101,50 @@ export default function App() {
     };
   }, [engine, setCheck]);
 
+  // Launch-time bootstrap: on a fresh machine the binary is missing, and a GUI launch
+  // does not inherit the shell PATH. Rust installs it, verifies the checksum, and
+  // reports progress on an event so this never blocks the UI thread.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+
+    const handle = (status: ToolchainStatus) => {
+      if (!cancelled) applyToolchain(status);
+    };
+
+    void (async () => {
+      // Progress events are a nicety; the returned status is authoritative. A failed
+      // subscription must not prevent the install from running.
+      try {
+        unlisten = await onToolchainStatus(handle);
+      } catch (err) {
+        note(`toolchain events unavailable: ${String(err)}`);
+      }
+      try {
+        handle(await ensureToolchain(false));
+      } catch (err) {
+        handle({
+          phase: 'error',
+          version: null,
+          path: null,
+          detail: String(err),
+          received: 0,
+          total: 0,
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [applyToolchain, note]);
+
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const onTime = () => setCurrentTime(audio.currentTime);
-    const onMeta = () => setDuration(audio.duration || 0);
+    const onTime = () => setCurrentTime(audio.currentTime);    const onMeta = () => setDuration(audio.duration || 0);
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     const onError = () => {
@@ -246,17 +305,6 @@ export default function App() {
     note(`seek to 80% took ${ms}ms${ms >= 500 ? ' — release-build protocol problem?' : ''}`);
   }, [engine, note, setCheck]);
 
-  const checkHealth = useCallback(async () => {
-    try {
-      const version = await invoke<string>('resolver_health');
-      setHealth(version);
-      note(`yt-dlp ${version}`);
-    } catch (err) {
-      setHealth(`unavailable: ${String(err)}`);
-      note(`yt-dlp health check failed: ${String(err)}`);
-    }
-  }, [note]);
-
   const updateBand = useCallback(
     (index: number, db: number) => {
       engine.setBandGain(index, db);
@@ -273,8 +321,35 @@ export default function App() {
           <h1>Malice</h1>
           <span className="tag">day 1 smoke test</span>
         </div>
-        <div className="env">{env}</div>
+        <div className="env">
+          {env}
+          {toolchain?.phase === 'ready' && toolchain.version ? ` · yt-dlp ${toolchain.version}` : ''}
+        </div>
       </header>
+
+      {toolchain && toolchain.phase !== 'ready' && (
+        <div className="bootstrap" data-phase={toolchain.phase}>
+          <span className="bootstrap-dot" />
+          <div className="bootstrap-text">
+            <strong>
+              {toolchain.phase === 'checking' && 'Checking yt-dlp…'}
+              {toolchain.phase === 'downloading' && 'Installing yt-dlp'}
+              {toolchain.phase === 'error' && 'yt-dlp unavailable'}
+            </strong>
+            {toolchain.detail && <span>{toolchain.detail}</span>}
+          </div>
+          {progressPercent(toolchain) !== null && (
+            <div className="bootstrap-progress">
+              <div style={{ width: `${progressPercent(toolchain)}%` }} />
+            </div>
+          )}
+          {toolchain.phase === 'error' && (
+            <button className="ghost" onClick={() => void ensureToolchain(true).then(applyToolchain)}>
+              Retry
+            </button>
+          )}
+        </div>
+      )}
 
       <main className="layout">
         <div className="column">
@@ -287,7 +362,7 @@ export default function App() {
                 placeholder="https://music.youtube.com/watch?v=…"
                 spellCheck={false}
               />
-              <button onClick={resolveYouTube} disabled={busy !== null}>
+              <button onClick={resolveYouTube} disabled={busy !== null || toolchain?.phase !== 'ready'}>
                 Resolve
               </button>
             </div>
@@ -295,10 +370,13 @@ export default function App() {
               <button className="ghost" onClick={openLocal} disabled={busy !== null}>
                 Open local file…
               </button>
-              <button className="ghost" onClick={checkHealth}>
-                Resolver health
+              <button
+                className="ghost"
+                onClick={() => void ensureToolchain(true).then(applyToolchain)}
+                disabled={busy !== null}
+              >
+                Recheck toolchain
               </button>
-              {health && <code className="health">{health}</code>}
             </div>
             {busy && <p className="busy">{busy}</p>}
           </section>

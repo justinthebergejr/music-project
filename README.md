@@ -13,11 +13,12 @@ and hardened — not just accepted.
 Day 1 of 14: infrastructure spike only.
 
 - [x] Tauri 2 shell (React + Vite + TypeScript), builds a macOS arm64 bundle
+- [x] Launch-time bootstrap: downloads and SHA-256-verifies `yt-dlp`, with rollback
 - [x] Loopback HTTP media server with Range support, session token, opaque ids
 - [x] Single Web Audio graph: element → 10× biquad EQ → gain → analyser → output
 - [x] Canvas visualizer driven by `requestAnimationFrame`, outside React
 - [x] yt-dlp resolve → download to cache → play from loopback
-- [x] Unit tests for Range parsing, token checks, path traversal, URL validation
+- [x] 10 unit tests + 1 network test (Range, tokens, traversal, URL, checksums)
 - [ ] Verified on Windows (pending)
 - [ ] Everything else
 
@@ -30,8 +31,8 @@ npm run tauri build        # bundled app in src-tauri/target/release/bundle
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-`yt-dlp` must be on `PATH` during development. Sidecar bundling for release builds is not
-wired up yet, so release artifacts also expect `yt-dlp` on `PATH` for now.
+`yt-dlp` is installed and updated by the app itself on first launch (checksum-verified,
+no manual setup). A system `yt-dlp` is only a last-resort fallback if that fails.
 
 ### Day 1 acceptance
 
