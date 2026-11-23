@@ -297,6 +297,35 @@ mod tests {
     }
 
     #[test]
+    fn headers_are_media_friendly() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("malice-hdr-{}.m4a", std::process::id()));
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+
+        let server = MediaServer::start().unwrap();
+        let id = server.register(path.clone());
+        let url = format!("/m/{}/{id}", server.token);
+
+        let (status, head, body) = http_get(server.port, &url, None);
+        let lower = head.to_ascii_lowercase();
+        assert_eq!(status, 200, "{head}");
+        assert_eq!(body.len(), 4096);
+        assert_eq!(lower.matches("content-length:").count(), 1, "duplicate content-length: {head}");
+        assert!(!lower.contains("transfer-encoding: chunked"), "chunked breaks duration: {head}");
+        assert!(lower.contains("accept-ranges: bytes"), "{head}");
+        assert!(lower.contains("cache-control: no-store"), "{head}");
+
+        let (status, head, body) = http_get(server.port, &url, Some("bytes=0-"));
+        let lower = head.to_ascii_lowercase();
+        assert_eq!(status, 206, "{head}");
+        assert_eq!(body.len(), 4096);
+        assert_eq!(lower.matches("content-length:").count(), 1, "{head}");
+        assert_eq!(lower.matches("content-range:").count(), 1, "{head}");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn serves_ranges_with_cors_and_rejects_bad_tokens() {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("malice-test-{}.wav", std::process::id()));

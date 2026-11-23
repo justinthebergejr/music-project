@@ -142,3 +142,36 @@ order cannot matter. A missing path or `NA` is an explicit error rather than a g
 **Why it matters:** this path had never executed in the app, because resolution failed
 earlier for an unrelated reason. A single hand-run of the real command found it in
 30 seconds; the UI would never have surfaced it as clearly.
+
+---
+
+## 7. Trusted `HTMLMediaElement.duration`, and assumed yt-dlp wrote a normal M4A
+
+**Context:** a 3:11 track displayed as 6:22 — exactly double.
+
+**What the code did:** `loadedmetadata` copied `audio.duration` into the UI and treated it
+as the truth, overriding the duration the resolver already knew.
+
+**How it was found:** the user reported 6:22 for a 3:11 song. The cached file measured
+191.4 s with both `ffprobe` and `afinfo`, and the loopback responses had a single correct
+`Content-Length` with no chunking — so neither the bytes nor the transport were at fault.
+Dumping the MP4 box layout showed the cause: yt-dlp had saved YouTube's DASH audio as a
+**fragmented MP4** (`moov` + `sidx` + 19 `moof`/`mdat` pairs). WebKit's incremental fMP4
+path miscomputes duration for that layout; the complete file parses correctly.
+
+**Fix:** two independent layers.
+
+1. The element is fed a complete `Blob` instead of a byte stream, so it never needs the
+   incremental fMP4 path (cached tracks are already fully downloaded, so this costs
+   nothing; files over 64 MB stay on HTTP to bound memory).
+2. Metadata duration wins whenever the element disagrees by more than 5%, and the
+   mismatch is logged and shown in the UI. The display cannot be wrong even if the
+   engine's parse is.
+
+**Regression test:** none automated yet — this needs an engine-level test harness
+(WebDriver). Recorded as a gap in `security-tests.md`; the manual step is the duration
+check in the Day 1 matrix.
+
+**Why it matters:** the file, the server, and the client were each individually correct.
+The bug lived in the *combination* — which is exactly the class of defect that only a
+real playback test catches.

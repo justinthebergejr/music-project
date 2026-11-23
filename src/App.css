@@ -319,6 +319,12 @@ button.ghost {
   color: var(--muted);
 }
 
+.diag {
+  color: #c9a227;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
 input[type='range'] {
   width: 100%;
   accent-color: var(--accent);

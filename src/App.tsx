@@ -28,6 +28,14 @@ const INITIAL_CHECKS: Check[] = [
 
 const TEST_URL = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
 
+/**
+ * Load media as an in-memory Blob instead of a loopback HTTP stream.
+ *
+ * Set to false to fall back to the plain HTTP source (one-line revert if a platform
+ * ever refuses to feed Blob media into Web Audio).
+ */
+const USE_BLOB_SOURCE = true;
+
 function formatTime(seconds: number) {
   if (!Number.isFinite(seconds)) return '0:00';
   const m = Math.floor(seconds / 60);
@@ -47,6 +55,7 @@ export default function App() {
   const [title, setTitle] = useState('nothing loaded');
   const [source, setSource] = useState<'none' | 'local' | 'youtube'>('none');
   const [duration, setDuration] = useState(0);
+  const [elementDuration, setElementDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -57,6 +66,8 @@ export default function App() {
   const [toolchain, setToolchain] = useState<ToolchainStatus | null>(null);
 
   const engine = engineRef.current;
+  const knownDurationRef = useRef(0);
+  const objectUrlRef = useRef<string | null>(null);
 
   const note = useCallback((line: string) => {
     setLog((prev) => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 60));
@@ -78,6 +89,62 @@ export default function App() {
       }
     },
     [setCheck],
+  );
+
+  /**
+   * The element's duration is advisory, not authoritative.
+   *
+   * YouTube's DASH audio arrives as a fragmented MP4 (moov + sidx + many moof/mdat
+   * pairs). WebKit's incremental fMP4 path miscomputes that duration — 2x on the first
+   * track tested — while the file on disk is correct (afinfo agrees with ffprobe).
+   * Metadata from the resolver is exact, so it wins when the two disagree.
+   */
+  const pickDuration = useCallback(
+    (raw: number) => {
+      const known = knownDurationRef.current;
+      if (!Number.isFinite(raw) || raw <= 0) return known;
+      if (known <= 0) return raw;
+      const ratio = raw / known;
+      if (ratio > 1.05 || ratio < 0.95) {
+        note(
+          `duration mismatch: element ${raw.toFixed(1)}s vs metadata ${known.toFixed(1)}s — using metadata`,
+        );
+        return known;
+      }
+      return raw;
+    },
+    [note],
+  );
+
+  /**
+   * Hand the element a complete resource rather than a byte stream.
+   *
+   * Every track is already fully on disk (cache-then-play), so loading it as a Blob is
+   * free in latency terms and sidesteps the fragmented-MP4 streaming quirks above.
+   * Large local files stay on the HTTP path to avoid holding hundreds of MB in memory.
+   */
+  const prepareSource = useCallback(
+    async (url: string, knownSize: number) => {
+      if (!USE_BLOB_SOURCE) return url;
+      const maxBlobBytes = 64 * 1024 * 1024;
+      if (knownSize > maxBlobBytes) return url;
+      try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const declared = Number(response.headers.get('content-length') ?? 0);
+        if (declared > maxBlobBytes) return url;
+        const blob = await response.blob();
+        if (blob.size > maxBlobBytes) return url;
+        if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+        const objectUrl = URL.createObjectURL(blob);
+        objectUrlRef.current = objectUrl;
+        return objectUrl;
+      } catch (err) {
+        note(`blob load failed, using direct source: ${String(err)}`);
+        return url;
+      }
+    },
+    [note],
   );
 
   useEffect(() => {
@@ -144,7 +211,11 @@ export default function App() {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const onTime = () => setCurrentTime(audio.currentTime);    const onMeta = () => setDuration(audio.duration || 0);
+    const onTime = () => setCurrentTime(audio.currentTime);    const onMeta = () => {
+      const raw = audio.duration;
+      setElementDuration(Number.isFinite(raw) ? raw : 0);
+      setDuration(pickDuration(raw));
+    };
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     const onError = () => {
@@ -204,12 +275,16 @@ export default function App() {
       const audio = audioRef.current;
       if (!audio) return;
       sampledRef.current = null;
+      knownDurationRef.current = knownDuration;
       setSource(kind);
       setTitle(nextTitle);
+      setElementDuration(0);
       setDuration(knownDuration);
       setCurrentTime(0);
       setPlaying(false);
-      audio.src = nextUrl;
+
+      const source = await prepareSource(nextUrl, 0);
+      audio.src = source;
       audio.load();
       await engine.resume();
       try {
@@ -219,7 +294,7 @@ export default function App() {
         setBusy(null);
       }
     },
-    [engine, note],
+    [engine, note, prepareSource],
   );
 
   const resolveYouTube = useCallback(async () => {
@@ -279,13 +354,13 @@ export default function App() {
 
   const seekTo = useCallback((fraction: number) => {
     const audio = audioRef.current;
-    if (!audio || !Number.isFinite(audio.duration)) return;
-    audio.currentTime = audio.duration * fraction;
-  }, []);
+    if (!audio || !Number.isFinite(duration) || duration <= 0) return;
+    audio.currentTime = duration * fraction;
+  }, [duration]);
 
   const seekTest = useCallback(async () => {
     const audio = audioRef.current;
-    if (!audio || !Number.isFinite(audio.duration) || audio.duration === 0) {
+    if (!audio || !Number.isFinite(duration) || duration === 0) {
       setCheck('seek', 'fail', 'load a track first');
       return;
     }
@@ -297,13 +372,13 @@ export default function App() {
         resolve();
       };
       audio.addEventListener('seeked', onSeeked);
-      audio.currentTime = audio.duration * 0.8;
+      audio.currentTime = duration * 0.8;
       setTimeout(resolve, 2000);
     });
     const ms = Math.round(performance.now() - started);
     setCheck('seek', ms < 500 ? 'pass' : 'fail', `${ms}ms to 80%`);
     note(`seek to 80% took ${ms}ms${ms >= 500 ? ' — release-build protocol problem?' : ''}`);
-  }, [engine, note, setCheck]);
+  }, [duration, engine, note, setCheck]);
 
   const updateBand = useCallback(
     (index: number, db: number) => {
@@ -311,6 +386,14 @@ export default function App() {
       setEq((prev) => prev.map((v, i) => (i === index ? db : v)));
     },
     [engine],
+  );
+
+  // Blob URLs are process-wide references; release the last one on unmount.
+  useEffect(
+    () => () => {
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    },
+    [],
   );
 
   return (
@@ -389,6 +472,9 @@ export default function App() {
                 <div className="track-title">{title}</div>
                 <div className="muted">
                   {formatTime(currentTime)} / {formatTime(duration)}
+                  {elementDuration > 0 && Math.abs(elementDuration - duration) > duration * 0.05 && (
+                    <span className="diag"> · element reports {formatTime(elementDuration)}</span>
+                  )}
                 </div>
               </div>
             </div>
