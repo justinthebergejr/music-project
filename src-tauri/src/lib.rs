@@ -3,6 +3,7 @@
 
 mod bootstrap;
 mod library_fs;
+mod media_cache;
 mod media_server;
 mod sidecar;
 
@@ -235,6 +236,44 @@ fn resolver_health(app: tauri::AppHandle) -> Result<String, String> {
     bootstrap::probe_version(&bin).ok_or_else(|| "yt-dlp found but not runnable".to_string())
 }
 
+/// Current managed-cache usage. The cap is supplied by the frontend so the policy has
+/// one obvious home (`core/platform/cache.ts`).
+#[tauri::command]
+async fn cache_stats(
+    state: State<'_, AppState>,
+    cap_bytes: u64,
+) -> Result<media_cache::CacheStats, String> {
+    let dir = state.cache_dir.clone();
+    drop(state);
+    tauri::async_runtime::spawn_blocking(move || media_cache::stats(&dir, cap_bytes))
+        .await
+        .map_err(|e| format!("cache task failed: {e}"))
+}
+
+/// Evict oldest cached media until under `cap_bytes`, then forget their media-server
+/// ids so a stale URL 404s instead of serving a deleted file.
+#[tauri::command]
+async fn cache_evict(
+    state: State<'_, AppState>,
+    cap_bytes: u64,
+    keep_paths: Vec<String>,
+) -> Result<media_cache::CacheStats, String> {
+    let dir = state.cache_dir.clone();
+    let media = state.media.clone();
+    drop(state);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut evicted: Vec<PathBuf> = Vec::new();
+        let stats = media_cache::evict(&dir, cap_bytes, &keep_paths, |path| {
+            evicted.push(path.to_path_buf());
+        });
+        media.forget_paths(&evicted);
+        stats
+    })
+    .await
+    .map_err(|e| format!("cache task failed: {e}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -274,7 +313,9 @@ pub fn run() {
             toolchain_ensure,
             toolchain_status,
             resolve_track,
-            resolver_health
+            resolver_health,
+            cache_stats,
+            cache_evict
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,7 +3,8 @@ import { open } from '@tauri-apps/plugin-dialog';
 import './App.css';
 import { EQ_BANDS, getAudioEngine } from './core/audio/AudioEngine';
 import { CanvasVisualizer } from './core/visualizer/CanvasVisualizer';
-import { importLocalTrack, resolveYouTubeTrack } from './core/platform/media';
+import { importLocalTrack, keepPathsForTrack, resolveYouTubeTrack } from './core/platform/media';
+import { DEFAULT_CACHE_CAP_BYTES, cacheEvict } from './core/platform/cache';
 import type { ToolchainStatus } from './core/platform/toolchain';
 import { usePlayer } from './features/player/usePlayer';
 import { useAnalyserProbe } from './features/smoke/useAnalyserProbe';
@@ -27,6 +28,7 @@ export default function App() {
   const engine = engineRef.current;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const visualizerRef = useRef<CanvasVisualizer | null>(null);
+  const evictedTrackRef = useRef<string | null>(null);
 
   const [checks, setChecks] = useState<Check[]>(INITIAL_CHECKS);
   const [url, setUrl] = useState(TEST_URL);
@@ -87,6 +89,19 @@ export default function App() {
 
   const probeKey = snapshot.state === 'playing' ? (snapshot.track?.id ?? null) : null;
   const { peak } = useAnalyserProbe(engine, probeKey, onAnalyserResult);
+
+  // Bound the cache once per played track. The playing file is protected, as are local
+  // library paths; `.part` downloads are skipped inside the Rust walk.
+  useEffect(() => {
+    if (snapshot.state !== 'playing' || !snapshot.track) return;
+    if (evictedTrackRef.current === snapshot.track.id) return;
+    evictedTrackRef.current = snapshot.track.id;
+
+    const keep = keepPathsForTrack(snapshot.track);
+    void cacheEvict(DEFAULT_CACHE_CAP_BYTES, keep).catch((error) => {
+      note(`cache evict failed: ${String(error)}`);
+    });
+  }, [note, snapshot.state, snapshot.track]);
 
   const resolveYouTube = useCallback(async () => {
     const target = url.trim();
