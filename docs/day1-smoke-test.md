@@ -29,6 +29,30 @@ cargo test --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture  # network
 ```
 
+## Day 2 manual checks — player, library, cache
+
+The automated parts of Day 2 are `npm test` (25 tests), `npm run lint`,
+`npm run build`, and `cargo test` (22 tests + 1 ignored network test). These three
+checks still need a real webview and audio device. They are recorded here so they are
+not lost, and the result boxes are deliberately unclaimed by the headless agent
+environment that produced this commit.
+
+| # | Check | Steps | Expected | Result |
+|---|-------|-------|----------|--------|
+| K | A 3:11 track still reads 3:11 | Resolve a track whose metadata duration is ~191.4 s and play it. Compare the transport display with `afinfo`/`ffprobe`. | Transport reads `3:11` for the whole track. If WebKit reports 382.8 s, the console shows `[player] duration mismatch: element 382.8s vs metadata 191.4s — using metadata` and the UI does **not** double. | ☐ not run (no GUI/audio in the agent environment) |
+| L | Analyser peak is non-zero while playing | Play any resolved or local track; watch the analyser meter and the checklist. | Peak rises above `0.005`; the checklist turns green; bars move. A flat `0.000` means a CORS/taint regression. | ☐ not run |
+| M | Track switching does not create a second `AudioContext` | Open the web inspector. Set a breakpoint in the `AudioEngine` constructor (or use the Web Audio panel on WebView2). Switch tracks three times. | The constructor is hit once for the process. One `AudioContext`; one `MediaElementSourceNode`; no second `<audio>` element created by React. | ☐ not run |
+
+The implementation evidence for these checks:
+
+- `PlayerController` is a process singleton (`core/player/index.ts`), and its constructor
+  is the only place that calls `new Audio()` and `engine.attach()`.
+- The duration policy is a single `refreshDuration()` in `PlayerController`, covered by
+  `PlayerController.test.ts` with an element duration exactly 2× metadata.
+- `App.tsx` contains no `<audio>` and no `play()`, `pause()`, `currentTime`, or
+  `createMediaElementSource` call; it renders from
+  `useSyncExternalStore(controller.subscribe, controller.getSnapshot)`.
+
 ## Failure → response
 
 | Symptom | Most likely cause | Response |

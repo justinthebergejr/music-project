@@ -10,17 +10,27 @@ and hardened — not just accepted.
 
 ## Status
 
-Day 1 of 14: infrastructure spike only.
+Day 2 of 14: player and library foundations.
 
-- [x] Tauri 2 shell (React + Vite + TypeScript), builds a macOS arm64 bundle
-- [x] Launch-time bootstrap: downloads and SHA-256-verifies `yt-dlp`, with rollback
-- [x] Loopback HTTP media server with Range support, session token, opaque ids
-- [x] Single Web Audio graph: element → 10× biquad EQ → gain → analyser → output
-- [x] Canvas visualizer driven by `requestAnimationFrame`, outside React
-- [x] yt-dlp resolve → download to cache → play from loopback
-- [x] 10 unit tests + 1 network test (Range, tokens, traversal, URL, checksums)
+- [x] Day 1 infrastructure: Tauri 2 shell, loopback media server with Range support,
+      single Web Audio graph, checksum-verified `yt-dlp` bootstrap
+- [x] Library domain model and versioned JSON store, with fsync + rename atomic writes
+      and `library.json.bak` on an unknown version
+- [x] `PlayerController`: owns the one `<audio>` element, queue/repeat/shuffle,
+      sequence-token concurrency, and the metadata-duration policy moved out of React
+- [x] React renders playback from `useSyncExternalStore`; `App.tsx` contains no audio
+      element and no playback logic
+- [x] Managed media cache: `cache_stats` / `cache_evict`, LRU by mtime, 500 MB default,
+      current track protected, `.part` downloads untouched, evicted ids 404
+- [x] ESLint flat config: `core/**` cannot import React, and only `core/platform`
+      may import `@tauri-apps/*`
+- [x] 25 Vitest tests + 22 Rust tests (1 network test ignored)
 - [ ] Verified on Windows (pending)
 - [ ] Everything else
+
+Day 1 acceptance is unchanged: a resolved track plays through the loopback server, a
+3:11 track reads 3:11, the analyser peak is non-zero, and exactly one `AudioContext`
+exists. See `docs/day1-smoke-test.md`.
 
 ## Run it
 
@@ -28,6 +38,9 @@ Day 1 of 14: infrastructure spike only.
 npm install
 npm run tauri dev          # development
 npm run tauri build        # bundled app in src-tauri/target/release/bundle
+npm run build              # typecheck + frontend bundle
+npm run lint               # core import boundaries
+npm test                   # Vitest: library, ids, controller, cache-path glue
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
@@ -39,6 +52,34 @@ no manual setup). A system `yt-dlp` is only a last-resort fallback if that fails
 Open the app, load a local file, confirm the analyser peak is above zero, drag an EQ
 band and hear it, then paste a YouTube URL and press Resolve. The checklist panel on
 the right tracks each of those. Details and failure responses: `docs/day1-smoke-test.md`.
+
+## Day 2 verification notes
+
+Automated checks, run in this checkout on 2026-11-23:
+
+```text
+npm run build                         pass
+npx eslint src --max-warnings=0       pass
+npm test                              25 passed (4 files)
+cargo test --manifest-path src-tauri/Cargo.toml
+                                      22 passed, 1 ignored (network install test)
+```
+
+Manual checks are **not** claimed here. This checkout was verified in a headless agent
+environment with no GUI or audio device. The three checks that need a real webview are
+recorded as K/L/M in `docs/day1-smoke-test.md`:
+
+- a 3:11 track still reads 3:11;
+- the analyser peak is non-zero while playing;
+- switching tracks does not create a second `AudioContext`.
+
+Run `npm run tauri dev` on the target Mac, follow those steps, and tick the boxes before
+calling Day 2 complete. The code-level evidence is the process singleton in
+`src/core/player/index.ts`, the single `refreshDuration()` in `PlayerController`, and the
+25 Vitest tests that exercise the duration, concurrency, and repeat paths.
+
+No changes were made to `tauri.conf.json`, `capabilities/`, the media-server route/token
+contract, or the `yt-dlp` bootstrap.
 
 ## Honest limits
 
