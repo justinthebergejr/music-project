@@ -77,6 +77,18 @@ impl MediaServer {
         format!("http://127.0.0.1:{}/m/{}/{}", self.port, self.token, id)
     }
 
+    /// Drop ids whose files no longer exist.
+    ///
+    /// Cache eviction calls this after a successful unlink, so a URL that was handed to
+    /// the webview earlier returns 404 instead of a ghost response for a deleted file.
+    pub fn forget_paths(&self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut files = self.files.lock().expect("media map poisoned");
+        files.retain(|_, registered| !paths.iter().any(|candidate| candidate == registered));
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -321,6 +333,27 @@ mod tests {
         assert_eq!(body.len(), 4096);
         assert_eq!(lower.matches("content-length:").count(), 1, "{head}");
         assert_eq!(lower.matches("content-range:").count(), 1, "{head}");
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn forget_paths_makes_an_existing_url_404() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("malice-forget-{}.m4a", std::process::id()));
+        std::fs::write(&path, b"audio bytes").unwrap();
+
+        let server = MediaServer::start().unwrap();
+        let id = server.register(path.clone());
+        let url = format!("/m/{}/{id}", server.token);
+
+        let (status, _, _) = http_get(server.port, &url, None);
+        assert_eq!(status, 200);
+
+        server.forget_paths(&[path.clone()]);
+
+        let (status, _, _) = http_get(server.port, &url, None);
+        assert_eq!(status, 404, "an evicted file must not be served through a stale id");
 
         std::fs::remove_file(path).ok();
     }

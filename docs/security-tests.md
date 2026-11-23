@@ -21,6 +21,10 @@ steps recorded · **todo** = not done yet.
 | S14 | Irreversible actions confirm first | todo | cache clear not built yet |
 | **S15** | **Remote binary install: HTTPS only, pinned repo, SHA-256 verified, `.part` then rename, `--version` probe, `.bak` rollback** | tested | `bootstrap::tests::installs_and_verifies_a_runnable_binary` |
 | **S16** | **Never prefer an unverified `PATH` binary** | manual | `bootstrap::ensure` has no system fallback; `locate` uses it last |
+| **S17** | **Core boundaries: `core/**` cannot import React; only `core/platform` may import `@tauri-apps/*`** | tested + manual | `npm run lint`; a deliberate `react` + `@tauri-apps` probe in `core/library` exits 1 |
+| **S18** | **Library writes are atomic and path-confined: temp → fsync → rename; only `library.json` directly in app data; symlinks refused** | tested | `library_fs::tests::*`; `validate_library_path` |
+| **S19** | **Cache eviction is confined to the app media cache: regular direct children only, `.part`/`.ytdl` skipped, `keepPaths` protected, evicted ids forgotten** | tested | `media_cache::tests::*`; `media_server::tests::forget_paths_makes_an_existing_url_404` |
+| **S20** | **Playback concurrency: at most one Blob/object URL in flight, a stale resolve cannot start playback, object URLs are revoked on replace and dispose** | tested | `PlayerController.test.ts` concurrent + dispose cases |
 
 ## How to re-run the automated part
 
@@ -28,7 +32,14 @@ steps recorded · **todo** = not done yet.
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture   # network
 npm run build               # typecheck + bundle
+npm run lint                # core import boundaries
+npm test                    # Vitest: library, ids, controller, cache-path glue
 ```
+
+The boundary rule can be re-proved in one command: add
+`src/core/library/__probe.ts` containing `import React from 'react'` and
+`import { invoke } from '@tauri-apps/api/core'`, then run
+`npx eslint src/core/library/__probe.ts` — it must exit non-zero. Delete the probe.
 
 ## Known gaps to close before the write-up
 
@@ -38,3 +49,8 @@ npm run build               # typecheck + bundle
 3. CSP has not yet been exercised against a deliberate injection. Add the canary test
    when lyrics rendering exists (S4/S11).
 4. No dependency audit in CI yet (`cargo audit`, `npm audit`, `cargo deny`).
+5. The analyser-peak and single-`AudioContext` checks still need a real webview; there is
+   no WebDriver harness yet. Steps are recorded in `day1-smoke-test.md`.
+6. `cache_evict` is called once per played track, not on a timer. A long single-track
+   session can stay above the cap until the next track starts; the protected playing file
+   is never deleted.

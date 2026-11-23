@@ -175,3 +175,135 @@ check in the Day 1 matrix.
 **Why it matters:** the file, the server, and the client were each individually correct.
 The bug lived in the *combination* — which is exactly the class of defect that only a
 real playback test catches.
+
+---
+
+## 8. A literal ESLint boundary banned the only sanctioned native seam
+
+**Context:** Step 4, `eslint.config.js`, first draft.
+
+**What the code did:** applied `no-restricted-imports` for `@tauri-apps/*` to all of
+`src/core/**`. That is the rule as written in the task, but `src/core/platform` exists
+precisely to import `invoke()` and the Tauri path API.
+
+**How it was found:** applying the rule literally to the existing tree flags
+`src/core/platform/toolchain.ts`, plus the new `media.ts`, `cache.ts`, and
+`libraryStorage.ts`. A rule that fails the documented boundary is not enforcing the
+boundary; it is banning it.
+
+**Fix:** two configs. React is banned in all of `core/**`; `@tauri-apps/*` is banned in
+`core/**` except `core/platform/**`. The single exception is recorded in
+`docs/architecture.md` and in the spec, rather than left implicit in the config.
+
+**Regression test:** a temporary `src/core/library/__probe.ts` importing both `react` and
+`@tauri-apps/api/core` produces two errors and exits 1; `npm run lint` passes after it is
+removed. Recorded as S17 in `security-tests.md`.
+
+**Why it matters:** a lint rule that fails correct code gets disabled or ignored, and the
+next real violation gets ignored with it.
+
+---
+
+## 9. Cache eviction could delete the file currently playing
+
+**Context:** Step 3, wiring `keepPaths` to the player.
+
+**What the code did:** the obvious `keepPaths` source was `track.filePath`, which is
+`null` for every YouTube track. The resolved cache path existed only inside Rust and was
+never returned to the frontend, so the LRU saw the currently playing file as an ordinary
+old entry. Serving a Range request does not update mtime, so it would also look like the
+oldest entry.
+
+**How it was found:** tracing a YouTube track through resolve → play → `cache_evict`
+while writing the Step 3 spec. The requirement says eviction needs Step 2's notion of
+"currently playing", and `track.filePath` cannot express that for a cached YouTube track.
+
+**Fix:** `resolve_track` now returns the canonical cache path. `core/platform/media.ts`
+records it per track id, and `keepPathsForTrack()` returns the local path and/or the cache
+path. `media_cache::evict` skips `keepPaths`; `MediaServer::forget_paths` removes ids for
+files it did delete. After eviction, unprotected resolved URLs are dropped so a deleted
+file is not handed to the element again.
+
+**Regression test:** `media_cache::tests::protected_paths_survive_even_when_the_cap_is_exceeded`,
+`media_server::tests::forget_paths_makes_an_existing_url_404`, and
+`src/core/platform/media.test.ts` (one resolve reused, path protected, dropped after
+eviction).
+
+**Why it matters:** "currently playing" is not the same as `track.filePath`; the cache path
+is an implementation detail that had to cross the boundary deliberately.
+
+---
+
+## 10. Awaiting the resolver before `engine.resume()` loses the user gesture
+
+**Context:** `PlayerController.playTrack`, first sketch.
+
+**What the code did:** followed the old `App.tsx` shape — `await resolveSource()`, prepare
+the Blob, then `await engine.resume()` and `element.play()`. A YouTube resolve takes 1–2
+seconds, so the click's transient activation is gone by the time the context is resumed.
+
+**How it was found:** reviewing the click handler → async gap against the audio-engine
+contract ("`AudioContext.resume()` happens inside a real user gesture"). The Day 1 code
+happened to work, but moving the logic into a class made the ordering easy to lose.
+
+**Fix:** call `engine.resume()` synchronously at the top of `playTrack`, before the first
+`await`, and await the same promise after preparation. A no-op catch is attached so an
+early resolver error does not leave an unhandled rejection.
+
+**Regression test:** `PlayerController.test.ts` — "starts engine.resume before the
+resolver can await" asserts the resolver observes `resumed === true`.
+
+**Why it matters:** this is a timing contract that the type system cannot express and the
+old component shape did not document.
+
+---
+
+## 11. `fs::write` would truncate the library in place
+
+**Context:** `library_fs.rs`, first design.
+
+**What the code did:** the obvious implementation is `fs::write(path, json)`. It opens the
+target with truncate, so a crash or `ENOSPC` after truncation leaves a zero-length or
+partial `library.json` — exactly the failure the spec forbids.
+
+**How it was found:** writing the crash requirement into the spec, then asking what test
+distinguishes the two implementations. A test that fails *before* the write starts would
+pass for `fs::write` too. The test has to fail **inside** the write.
+
+**Fix:** `atomic_write_with` creates/truncates `<file>.tmp`, writes, calls `sync_all`,
+renames over the target, and fsyncs the parent on Unix. Any error removes the temp file.
+The target path is only ever produced by the rename.
+
+**Regression test:** `library_fs::tests::a_failed_write_never_truncates_the_previous_target`
+injects a writer that writes 18 bytes and then returns an error; the old bytes survive and
+no `.tmp` remains. `atomic_write_leaves_a_complete_file_and_no_temp` covers the success
+path.
+
+**Why it matters:** atomicity is a property of the syscall sequence, not of a function
+name; the test has to be able to fail mid-write.
+
+---
+
+## 12. The concurrency token did not bound Blob memory
+
+**Context:** `PlayerController.playTrack`, first concurrency sketch.
+
+**What the code did:** gave every call a sequence token, resolved both, then checked the
+token before attaching. That prevents stale *playback*, but two quick clicks could still
+both `fetch` and both call `URL.createObjectURL`; the second assignment overwrote
+`objectUrl` and leaked the first blob.
+
+**How it was found:** reviewing the "never hold more than one Blob at a time" requirement
+against the token sketch. A token answers "who may play?", not "how many blobs exist?".
+
+**Fix:** each preparation gets an `AbortController`; starting a newer `playTrack` aborts
+the previous fetch. A stale result revokes its own object URL. `attachSource` revokes the
+previous object URL only after assigning and loading the new `src`, so it cannot abort the
+load that is still current.
+
+**Regression test:** the concurrent `playTrack` test asserts exactly one `play()` call and
+exactly one `createObjectURL` call; the dispose test asserts the active URL is revoked;
+`media.test.ts` covers the one-resolve cache path.
+
+**Why it matters:** cancellation, playback ordering, and memory lifetime are three
+separate obligations; a single sequence token only covers the middle one.
