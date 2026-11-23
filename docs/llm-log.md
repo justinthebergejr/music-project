@@ -118,3 +118,27 @@ completes.
 
 **Why it matters:** unhandled rejections in `void (async () => …)()` are invisible in
 production. Two independent mechanisms now carry the same information.
+
+---
+
+## 6. Parsed yt-dlp output by position — `after_move` prints last
+
+**Context:** `sidecar.rs::resolve_audio`.
+
+**What the code did:** assumed a fixed field order and read
+`lines[n-4] → path`, `lines[n-3] → title`, and so on.
+
+**How it was found:** running the exact production argv by hand. The real order is
+`title, duration, id, filepath` — the `after_move` stage is evaluated after the metadata
+prints, so the file path is always the *last* line. My parse would have taken the title
+as the path and failed with "resolved file missing".
+
+**Fix:** each field is printed with a `MALICE_*=` tag and parsed by prefix, so field
+order cannot matter. A missing path or `NA` is an explicit error rather than a guess.
+
+**Regression test:** `sidecar::tests::print_output_is_parsed_regardless_of_field_order`,
+`sidecar::tests::missing_path_is_an_error_not_a_guess`.
+
+**Why it matters:** this path had never executed in the app, because resolution failed
+earlier for an unrelated reason. A single hand-run of the real command found it in
+30 seconds; the UI would never have surfaced it as clearly.

@@ -147,6 +147,23 @@ pub fn run() {
             let cache_dir = app.path().app_cache_dir()?.join("media");
             std::fs::create_dir_all(&cache_dir)?;
             app.manage(AppState { media, cache_dir });
+
+            // Install/repair the toolchain at launch, independent of the webview.
+            // The UI subscribes to the same event and also receives the final status
+            // from its own `toolchain_ensure` call, so a late subscriber loses nothing.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let Ok(data_dir) = handle.path().app_data_dir() else {
+                    eprintln!("[toolchain] no app data directory");
+                    return;
+                };
+                let emitter = handle.clone();
+                let status = bootstrap::ensure(&data_dir, false, &move |s| {
+                    let _ = emitter.emit("toolchain://status", s.clone());
+                });
+                let _ = handle.emit("toolchain://status", status);
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -85,13 +85,14 @@ pub fn resolve_audio(bin: &Path, raw_url: &str, cache_dir: &Path) -> Result<Reso
         "-o".into(),
         out_template,
         "--print".into(),
-        "after_move:filepath".into(),
+        "MALICE_TITLE=%(title)s".into(),
         "--print".into(),
-        "%(title)s".into(),
+        "MALICE_DURATION=%(duration)s".into(),
         "--print".into(),
-        "%(duration)s".into(),
+        "MALICE_ID=%(id)s".into(),
+        // after_move stages print last, so fields are tagged rather than positional.
         "--print".into(),
-        "%(id)s".into(),
+        "after_move:MALICE_PATH=%(filepath)s".into(),
         "--".into(),
         url.to_string(),
     ];
@@ -118,17 +119,8 @@ pub fn resolve_audio(bin: &Path, raw_url: &str, cache_dir: &Path) -> Result<Reso
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.len() < 4 {
-        return Err("unexpected yt-dlp output".into());
-    }
-    let n = lines.len();
-    let path = lines[n - 4];
-    let title = lines[n - 3];
-    let duration = lines[n - 2].parse::<f64>().unwrap_or(0.0);
-    let video_id = lines[n - 1];
-
-    let file = PathBuf::from(path);
+    let (path, title, duration, video_id) = parse_print_output(&stdout)?;
+    let file = PathBuf::from(&path);
     let canonical_file = file.canonicalize().map_err(|e| format!("resolved file missing: {e}"))?;
     let canonical_cache = cache_dir.canonicalize().map_err(|e| format!("cache dir: {e}"))?;
     if !canonical_file.starts_with(&canonical_cache) {
@@ -145,10 +137,43 @@ pub fn resolve_audio(bin: &Path, raw_url: &str, cache_dir: &Path) -> Result<Reso
 
     Ok(ResolvedTrack {
         path: canonical_file.to_string_lossy().into_owned(),
-        title: title.to_string(),
+        title,
         duration,
-        video_id: video_id.to_string(),
+        video_id,
     })
+}
+
+/// Field order from `--print` is not stable: the `after_move` stage prints last.
+/// Tagged fields make the parse order-independent.
+fn parse_print_output(stdout: &str) -> Result<(String, String, f64, String), String> {
+    let mut path = None;
+    let mut title = None;
+    let mut duration = None;
+    let mut id = None;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("MALICE_PATH=") {
+            path = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("MALICE_TITLE=") {
+            title = Some(v.to_string());
+        } else if let Some(v) = line.strip_prefix("MALICE_DURATION=") {
+            duration = Some(v.parse::<f64>().unwrap_or(0.0));
+        } else if let Some(v) = line.strip_prefix("MALICE_ID=") {
+            id = Some(v.to_string());
+        }
+    }
+
+    let path = path.ok_or("yt-dlp did not report a file path")?;
+    if path.is_empty() || path == "NA" {
+        return Err("yt-dlp reported no output file".into());
+    }
+    Ok((
+        path,
+        title.unwrap_or_else(|| "unknown title".into()),
+        duration.unwrap_or(0.0),
+        id.unwrap_or_default(),
+    ))
 }
 
 pub fn is_supported_audio(path: &Path) -> bool {
@@ -187,5 +212,29 @@ mod tests {
         assert!(validate_url("--exec=touch /tmp/owned").is_err());
         assert!(validate_url("-o/tmp/owned").is_err());
         assert!(validate_url("https://www.youtube.com/watch?v=x --exec=touch /tmp/owned").is_err());
+    }
+
+    /// Real yt-dlp output: the after_move stage prints last, not first.
+    #[test]
+    fn print_output_is_parsed_regardless_of_field_order() {
+        let stdout = "\
+MALICE_TITLE=Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)
+MALICE_DURATION=213
+MALICE_ID=dQw4w9WgXcQ
+MALICE_PATH=/tmp/malice-cache/dQw4w9WgXcQ.m4a
+";
+        let (path, title, duration, id) = parse_print_output(stdout).unwrap();
+        assert_eq!(path, "/tmp/malice-cache/dQw4w9WgXcQ.m4a");
+        assert!(title.starts_with("Rick Astley"));
+        assert_eq!(duration, 213.0);
+        assert_eq!(id, "dQw4w9WgXcQ");
+    }
+
+    #[test]
+    fn missing_path_is_an_error_not_a_guess() {
+        let stdout = "MALICE_TITLE=x\nMALICE_DURATION=1\nMALICE_ID=abc\n";
+        assert!(parse_print_output(stdout).is_err());
+        let failed_move = "MALICE_PATH=NA\nMALICE_TITLE=x\n";
+        assert!(parse_print_output(failed_move).is_err());
     }
 }
